@@ -161,9 +161,13 @@ export default async function handler(req,res){
     });
   }catch(error){
     console.error("snapshot-generate error",error);
-    return res.status(500).json({
-      error:"Snapshot generation failed",
-      detail: process.env.NODE_ENV==="development" ? String(error?.message || error) : undefined
+    const message=String(error?.message || error);
+    const quotaProblem=error?.status===429 || message.toLowerCase().includes("no credits");
+    return res.status(quotaProblem ? 503 : 500).json({
+      error: quotaProblem
+        ? "AI image generation is temporarily unavailable. Please try again later."
+        : "Snapshot generation failed",
+      detail: process.env.NODE_ENV==="development" ? message : undefined
     });
   }
 }

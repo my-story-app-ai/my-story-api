@@ -177,9 +177,13 @@ export default async function handler(req,res){
 
   }catch(error){
     console.error("story-plan error",error);
-    return res.status(500).json({
-      error:"AI Story Planner failed",
-      detail: String(error?.message || error)
+    const message=String(error?.message || error);
+    const quotaProblem=error?.status===429 || message.toLowerCase().includes("no credits");
+    return res.status(quotaProblem ? 503 : 500).json({
+      error: quotaProblem
+        ? "AI planning is temporarily unavailable. Please try again later."
+        : "AI Story Planner failed",
+      detail: process.env.NODE_ENV==="development" ? message : undefined
     });
   }
 }
