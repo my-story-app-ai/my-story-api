@@ -1,0 +1,9 @@
+{
+  "name": "my-story-ai-planner",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "^5.0.0"
+  }
+}

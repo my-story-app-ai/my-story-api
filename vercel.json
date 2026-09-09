@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/story-plan.js": {
+      "maxDuration": 60
+    }
+  }
+}
