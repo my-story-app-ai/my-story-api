@@ -2,6 +2,9 @@
   "functions": {
     "api/story-plan.js": {
       "maxDuration": 60
+    },
+    "api/snapshot-generate.js": {
+      "maxDuration": 120
     }
   }
 }
