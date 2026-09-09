@@ -5,6 +5,8 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+const DEFAULT_PLANNER_MODEL = "gpt-4.1-mini";
+
 const snapshotSchema = {
   type: "object",
   additionalProperties: false,
@@ -55,6 +57,13 @@ function safeImages(images=[]){
   return images
     .filter(x => x && typeof x.dataUrl === "string" && x.dataUrl.startsWith("data:image/"))
     .slice(0,6);
+}
+
+function plannerModel(){
+  const configured=process.env.OPENAI_PLANNER_MODEL?.trim();
+  if(!configured) return DEFAULT_PLANNER_MODEL;
+  if(configured.includes("codex") || configured.includes("5.6")) return DEFAULT_PLANNER_MODEL;
+  return configured;
 }
 
 function plannerPrompt(body){
@@ -132,9 +141,9 @@ export default async function handler(req,res){
 
     const schema=body.format==="My Story" ? storySchema : snapshotSchema;
 
+    const model=plannerModel();
     const response=await client.responses.create({
-      model: process.env.OPENAI_PLANNER_MODEL || "gpt-5.6-terra",
-      reasoning: { effort: "low" },
+      model,
       input:[{
         role:"user",
         content
@@ -163,14 +172,14 @@ export default async function handler(req,res){
 
     return res.status(200).json({
       plan,
-      model: process.env.OPENAI_PLANNER_MODEL || "gpt-5.6-terra"
+      model
     });
 
   }catch(error){
     console.error("story-plan error",error);
     return res.status(500).json({
       error:"AI Story Planner failed",
-      detail: process.env.NODE_ENV==="development" ? String(error?.message || error) : undefined
+      detail: String(error?.message || error)
     });
   }
 }

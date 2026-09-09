@@ -1,5 +1,6 @@
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_GENERATIONS_URL = "https://api.openai.com/v1/images/generations";
+const DEFAULT_IMAGE_MODEL = "gpt-image-1";
 const MAX_IMAGES = 6;
 const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
 
@@ -86,7 +87,7 @@ Keep recognizable clothing, relationships, setting cues, atmosphere, and importa
 
 async function callOpenAIWithImages(body, images){
   const form=new FormData();
-  form.append("model", process.env.OPENAI_IMAGE_MODEL || "gpt-image-2");
+  form.append("model", process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL);
   form.append("prompt", buildSnapshotPrompt(body));
   form.append("size", process.env.OPENAI_IMAGE_SIZE || "1024x1024");
   form.append("quality", process.env.OPENAI_IMAGE_QUALITY || "medium");
@@ -112,7 +113,7 @@ async function callOpenAITextOnly(body){
       "Content-Type":"application/json"
     },
     body:JSON.stringify({
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+      model: process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL,
       prompt: buildSnapshotPrompt(body),
       size: process.env.OPENAI_IMAGE_SIZE || "1024x1024",
       quality: process.env.OPENAI_IMAGE_QUALITY || "medium",
@@ -156,7 +157,7 @@ export default async function handler(req,res){
         dataUrl:`data:image/png;base64,${b64}`,
         mimeType:"image/png"
       },
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2"
+      model: process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL
     });
   }catch(error){
     console.error("snapshot-generate error",error);
