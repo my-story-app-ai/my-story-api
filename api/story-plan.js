@@ -6,6 +6,12 @@ const client = new OpenAI({
 });
 
 const DEFAULT_PLANNER_MODEL = "gpt-4.1-mini";
+const MAX_IMAGES = 6;
+const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
+const MAX_MEMORY_CHARS = 5000;
+const ALLOWED_FORMATS = ["Snapshot","My Story"];
+const ALLOWED_MODES = ["Easy","Guided"];
+const ALLOWED_SOURCES = ["event","reconstruct"];
 
 const snapshotSchema = {
   type: "object",
@@ -56,7 +62,34 @@ const storySchema = {
 function safeImages(images=[]){
   return images
     .filter(x => x && typeof x.dataUrl === "string" && x.dataUrl.startsWith("data:image/"))
-    .slice(0,6);
+    .slice(0,MAX_IMAGES);
+}
+
+function jsonError(res,status,error,code,retryable=false){
+  return res.status(status).json({error,code,retryable});
+}
+
+function hasText(value){
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function totalImageBytes(images){
+  return images.reduce((sum,image)=>sum + Buffer.byteLength(image.dataUrl,"utf8"),0);
+}
+
+function validateRequest(body){
+  if(!ALLOWED_FORMATS.includes(body.format)) return {status:400,error:"Invalid format",code:"invalid_format"};
+  if(!ALLOWED_MODES.includes(body.mode)) return {status:400,error:"Invalid mode",code:"invalid_mode"};
+  if(!ALLOWED_SOURCES.includes(body.source)) return {status:400,error:"Invalid source path",code:"invalid_source"};
+  if(!hasText(body.details?.memory)) return {status:400,error:"Memory description is required",code:"missing_memory"};
+  if(String(body.details.memory).length > MAX_MEMORY_CHARS) return {status:400,error:"Memory description is too long. Please shorten it before creating a preview.",code:"memory_too_long"};
+
+  const rawImages=Array.isArray(body.images) ? body.images : [];
+  if(rawImages.length > MAX_IMAGES) return {status:413,error:`Please upload no more than ${MAX_IMAGES} images.`,code:"too_many_images"};
+  const images=safeImages(rawImages);
+  if(images.length < 1) return {status:400,error:"At least one source image is required.",code:"missing_images"};
+  if(totalImageBytes(images) > MAX_DATA_URL_BYTES) return {status:413,error:"Uploaded images are too large. Please use fewer or smaller photos.",code:"images_too_large"};
+  return null;
 }
 
 function plannerModel(){
@@ -125,13 +158,13 @@ export default async function handler(req,res){
   res.setHeader("Access-Control-Allow-Headers","Content-Type");
 
   if(req.method==="OPTIONS") return res.status(204).end();
-  if(req.method!=="POST") return res.status(405).json({error:"POST only"});
-  if(!process.env.OPENAI_API_KEY) return res.status(500).json({error:"OPENAI_API_KEY is not configured"});
+  if(req.method!=="POST") return jsonError(res,405,"POST only","method_not_allowed");
+  if(!process.env.OPENAI_API_KEY) return jsonError(res,500,"AI service is not configured","missing_openai_key",true);
 
   try{
     const body=req.body || {};
-    if(!body.details?.memory) return res.status(400).json({error:"Memory description is required"});
-    if(!["Snapshot","My Story"].includes(body.format)) return res.status(400).json({error:"Invalid format"});
+    const validationError=validateRequest(body);
+    if(validationError) return jsonError(res,validationError.status,validationError.error,validationError.code);
 
     const content=[{type:"input_text",text:plannerPrompt(body)}];
     for(const image of safeImages(body.images)){
@@ -178,11 +211,15 @@ export default async function handler(req,res){
   }catch(error){
     console.error("story-plan error",error);
     const message=String(error?.message || error);
-    const quotaProblem=error?.status===429 || message.toLowerCase().includes("no credits");
+    const lowerMessage=message.toLowerCase();
+    const quotaProblem=error?.status===429 || lowerMessage.includes("no credits") || lowerMessage.includes("quota");
+    const temporaryProblem=quotaProblem || error?.status>=500 || lowerMessage.includes("timeout");
     return res.status(quotaProblem ? 503 : 500).json({
       error: quotaProblem
         ? "AI planning is temporarily unavailable. Please try again later."
         : "AI Story Planner failed",
+      code: quotaProblem ? "planner_quota_unavailable" : "planner_failed",
+      retryable: temporaryProblem,
       detail: process.env.NODE_ENV==="development" ? message : undefined
     });
   }

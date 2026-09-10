@@ -3,6 +3,9 @@ const OPENAI_GENERATIONS_URL = "https://api.openai.com/v1/images/generations";
 const DEFAULT_IMAGE_MODEL = "gpt-image-1";
 const MAX_IMAGES = 6;
 const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
+const MAX_MEMORY_CHARS = 5000;
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_IMAGE_TIMEOUT_MS || 110000);
+const ALLOWED_SOURCES = ["event","reconstruct"];
 
 function setCors(res){
   res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
@@ -14,6 +17,10 @@ function hasText(value){
   return typeof value==="string" && value.trim().length>0;
 }
 
+function jsonError(res,status,error,code,retryable=false){
+  return res.status(status).json({error,code,retryable});
+}
+
 function safeImages(images=[]){
   return images
     .filter(image => image && typeof image.dataUrl==="string" && image.dataUrl.startsWith("data:image/"))
@@ -21,17 +28,24 @@ function safeImages(images=[]){
 }
 
 function validateSnapshotPackage(body){
+  if(process.env.REQUIRE_PAYMENT==="true" && body.payment?.status!=="paid"){
+    return {status:402,error:"Payment is required before generation.",code:"payment_required"};
+  }
   if(body.format!=="Snapshot") return "Snapshot generation only supports the Snapshot format in v0.8.";
+  if(!ALLOWED_SOURCES.includes(body.source)) return {status:400,error:"Invalid source path",code:"invalid_source"};
   if(!body.details || !hasText(body.details.memory)) return "Memory description is required.";
+  if(String(body.details.memory).length>MAX_MEMORY_CHARS) return {status:400,error:"Memory description is too long. Please shorten it before generation.",code:"memory_too_long"};
   const plan=body.plan;
   if(!plan || typeof plan!=="object") return "Approved Snapshot plan is required.";
   for(const key of ["title","synopsis","source_strategy","action","framing","emotion","visual_anchor"]){
     if(!hasText(plan[key])) return `Approved Snapshot plan is missing ${key}.`;
   }
-  const images=safeImages(body.images);
+  const rawImages=Array.isArray(body.images) ? body.images : [];
+  if(rawImages.length>MAX_IMAGES) return {status:413,error:`Please upload no more than ${MAX_IMAGES} images.`,code:"too_many_images"};
+  const images=safeImages(rawImages);
   if(images.length<1) return "At least one source image is required for live Snapshot generation.";
   const totalBytes=images.reduce((sum,image)=>sum + Buffer.byteLength(image.dataUrl,"utf8"),0);
-  if(totalBytes>MAX_DATA_URL_BYTES) return "Uploaded images are too large for generation. Please use smaller images.";
+  if(totalBytes>MAX_DATA_URL_BYTES) return {status:413,error:"Uploaded images are too large for generation. Please use fewer or smaller photos.",code:"images_too_large"};
   return "";
 }
 
@@ -85,6 +99,16 @@ Keep recognizable clothing, relationships, setting cues, atmosphere, and importa
 `.trim();
 }
 
+async function fetchWithTimeout(url, options, timeoutMs=OPENAI_TIMEOUT_MS){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(), timeoutMs);
+  try{
+    return await fetch(url,{...options,signal:controller.signal});
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
 async function callOpenAIWithImages(body, images){
   const form=new FormData();
   form.append("model", process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL);
@@ -98,7 +122,7 @@ async function callOpenAIWithImages(body, images){
     form.append("image", parsed.blob, `source-${index+1}.${parsed.extension}`);
   });
 
-  return fetch(OPENAI_IMAGES_URL,{
+  return fetchWithTimeout(OPENAI_IMAGES_URL,{
     method:"POST",
     headers:{Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},
     body:form
@@ -106,7 +130,7 @@ async function callOpenAIWithImages(body, images){
 }
 
 async function callOpenAITextOnly(body){
-  return fetch(OPENAI_GENERATIONS_URL,{
+  return fetchWithTimeout(OPENAI_GENERATIONS_URL,{
     method:"POST",
     headers:{
       Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,
@@ -126,13 +150,16 @@ export default async function handler(req,res){
   setCors(res);
 
   if(req.method==="OPTIONS") return res.status(204).end();
-  if(req.method!=="POST") return res.status(405).json({error:"POST only"});
-  if(!process.env.OPENAI_API_KEY) return res.status(500).json({error:"OPENAI_API_KEY is not configured"});
+  if(req.method!=="POST") return jsonError(res,405,"POST only","method_not_allowed");
+  if(!process.env.OPENAI_API_KEY) return jsonError(res,500,"AI service is not configured","missing_openai_key",true);
 
   try{
     const body=req.body || {};
     const validationError=validateSnapshotPackage(body);
-    if(validationError) return res.status(400).json({error:validationError});
+    if(validationError){
+      if(typeof validationError==="string") return jsonError(res,400,validationError,"invalid_snapshot_request");
+      return jsonError(res,validationError.status,validationError.error,validationError.code);
+    }
 
     const images=safeImages(body.images);
     const response=images.length ? await callOpenAIWithImages(body,images) : await callOpenAITextOnly(body);
@@ -146,7 +173,11 @@ export default async function handler(req,res){
 
     if(!response.ok){
       const message=payload?.error?.message || "OpenAI image request failed";
-      return res.status(response.status).json({error:message});
+      return res.status(response.status).json({
+        error:message,
+        code:response.status===429 ? "image_quota_unavailable" : "image_openai_failed",
+        retryable:response.status===429 || response.status>=500
+      });
     }
 
     const b64=payload?.data?.[0]?.b64_json;
@@ -162,11 +193,17 @@ export default async function handler(req,res){
   }catch(error){
     console.error("snapshot-generate error",error);
     const message=String(error?.message || error);
-    const quotaProblem=error?.status===429 || message.toLowerCase().includes("no credits");
+    const lowerMessage=message.toLowerCase();
+    const quotaProblem=error?.status===429 || lowerMessage.includes("no credits") || lowerMessage.includes("quota");
+    const timeoutProblem=error?.name==="AbortError" || lowerMessage.includes("abort") || lowerMessage.includes("timeout");
     return res.status(quotaProblem ? 503 : 500).json({
       error: quotaProblem
         ? "AI image generation is temporarily unavailable. Please try again later."
-        : "Snapshot generation failed",
+        : timeoutProblem
+          ? "AI image generation took too long. Please try again."
+          : "Snapshot generation failed",
+      code: quotaProblem ? "image_quota_unavailable" : timeoutProblem ? "image_timeout" : "image_failed",
+      retryable: quotaProblem || timeoutProblem,
       detail: process.env.NODE_ENV==="development" ? message : undefined
     });
   }
