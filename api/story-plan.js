@@ -1,11 +1,11 @@
 
 import OpenAI from "openai";
+import {continuityKeys, continuityProperties, continuityRules, hasContinuity, plannerModel} from "../lib/story-continuity.js";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const DEFAULT_PLANNER_MODEL = "gpt-4.1-mini";
 const MAX_IMAGES = 6;
 const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
 const MAX_MEMORY_CHARS = 5000;
@@ -46,10 +46,11 @@ const sceneSchema = {
 const storySchema = {
   type: "object",
   additionalProperties: false,
-  required: ["title","synopsis","scenes"],
+  required: ["title","synopsis","scenes",...continuityKeys],
   properties: {
     title: { type: "string" },
     synopsis: { type: "string" },
+    ...continuityProperties,
     scenes: {
       type: "array",
       minItems: 4,
@@ -90,13 +91,6 @@ function validateRequest(body){
   if(images.length < 1) return {status:400,error:"At least one source image is required.",code:"missing_images"};
   if(totalImageBytes(images) > MAX_DATA_URL_BYTES) return {status:413,error:"Uploaded images are too large. Please use fewer or smaller photos.",code:"images_too_large"};
   return null;
-}
-
-function plannerModel(){
-  const configured=process.env.OPENAI_PLANNER_MODEL?.trim();
-  if(!configured) return DEFAULT_PLANNER_MODEL;
-  if(configured.includes("codex") || configured.includes("5.6")) return DEFAULT_PLANNER_MODEL;
-  return configured;
 }
 
 function plannerPrompt(body){
@@ -146,6 +140,7 @@ MY STORY RULES:
 - Do not repeat the same dominant location or camera framing in all scenes.
 - The synopsis should explain the complete story arc in concise, emotionally clear prose.
 - Guided vs Easy changes only user control later; produce the same high-quality plan.
+${format==="My Story" ? continuityRules : ""}
 
 Write concise production-ready fields. No markdown.
 `.trim();
@@ -198,6 +193,7 @@ export default async function handler(req,res){
 
     // Lightweight server-side diversity validation.
     if(body.format==="My Story"){
+      if(!hasContinuity(plan)) throw new Error("Planner returned an incomplete continuity brief");
       if(!Array.isArray(plan.scenes) || plan.scenes.length!==4){
         throw new Error("Planner did not return exactly four scenes");
       }

@@ -1,13 +1,12 @@
 import { resolveOutputPreset as resolveConfiguredOutputPreset } from "./output-presets.js";
 import sharp from "sharp";
+import {callOpenAIWithImages, fetchWithTimeout} from "../lib/image-client.js";
 
-const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_GENERATIONS_URL = "https://api.openai.com/v1/images/generations";
 const DEFAULT_IMAGE_MODEL = "gpt-image-1";
 const MAX_IMAGES = 6;
 const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
 const MAX_MEMORY_CHARS = 5000;
-const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_IMAGE_TIMEOUT_MS || 110000);
 const ALLOWED_SOURCES = ["event","reconstruct"];
 const PRINT_JPEG_QUALITY = Math.max(80,Math.min(98,Number(process.env.PRINT_JPEG_QUALITY || 94)));
 
@@ -62,17 +61,6 @@ function validateSnapshotPackage(body){
   return "";
 }
 
-function dataUrlToBlob(dataUrl){
-  const match=dataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,(.+)$/);
-  if(!match) throw new Error("Unsupported image data URL.");
-  const mimeType=match[1]==="image/jpg" ? "image/jpeg" : match[1];
-  const buffer=Buffer.from(match[2],"base64");
-  return {
-    blob:new Blob([buffer],{type:mimeType}),
-    mimeType,
-    extension:mimeType.split("/")[1].replace("jpeg","jpg")
-  };
-}
 
 function buildSnapshotPrompt(body){
   const {details={},plan={},source}=body;
@@ -183,35 +171,7 @@ async function exportSnapshotImage(base64Image, outputPreset){
   };
 }
 
-async function fetchWithTimeout(url, options, timeoutMs=OPENAI_TIMEOUT_MS){
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(), timeoutMs);
-  try{
-    return await fetch(url,{...options,signal:controller.signal});
-  }finally{
-    clearTimeout(timer);
-  }
-}
 
-async function callOpenAIWithImages(body, images){
-  const form=new FormData();
-  form.append("model", process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL);
-  form.append("prompt", buildSnapshotPrompt(body));
-  form.append("size", process.env.OPENAI_IMAGE_SIZE || "1024x1024");
-  form.append("quality", process.env.OPENAI_IMAGE_QUALITY || "medium");
-  form.append("output_format", "png");
-
-  images.forEach((image,index)=>{
-    const parsed=dataUrlToBlob(image.dataUrl);
-    form.append("image", parsed.blob, `source-${index+1}.${parsed.extension}`);
-  });
-
-  return fetchWithTimeout(OPENAI_IMAGES_URL,{
-    method:"POST",
-    headers:{Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},
-    body:form
-  });
-}
 
 async function callOpenAITextOnly(body){
   return fetchWithTimeout(OPENAI_GENERATIONS_URL,{
@@ -246,7 +206,7 @@ export default async function handler(req,res){
     }
 
     const images=safeImages(body.images);
-    const response=images.length ? await callOpenAIWithImages(body,images) : await callOpenAITextOnly(body);
+    const response=images.length ? await callOpenAIWithImages(buildSnapshotPrompt(body),images) : await callOpenAITextOnly(body);
     const raw=await response.text();
     let payload={};
     try{
