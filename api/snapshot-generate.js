@@ -1,3 +1,5 @@
+import { resolveOutputPreset as resolveConfiguredOutputPreset } from "./output-presets.js";
+
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_GENERATIONS_URL = "https://api.openai.com/v1/images/generations";
 const DEFAULT_IMAGE_MODEL = "gpt-image-1";
@@ -27,11 +29,20 @@ function safeImages(images=[]){
     .slice(0,MAX_IMAGES);
 }
 
+function resolveOutputPreset(body){
+  const presetId=typeof body.outputPresetId==="string" ? body.outputPresetId : body.outputPreset?.id;
+  return resolveConfiguredOutputPreset("Snapshot",presetId);
+}
+
 function validateSnapshotPackage(body){
   if(process.env.REQUIRE_PAYMENT==="true" && body.payment?.status!=="paid"){
     return {status:402,error:"Payment is required before generation.",code:"payment_required"};
   }
   if(body.format!=="Snapshot") return "Snapshot generation only supports the Snapshot format in v0.8.";
+  const outputPreset=resolveOutputPreset(body);
+  if(!outputPreset) return {status:400,error:"Invalid output preset",code:"invalid_output_preset"};
+  if(body.outputPresetId && body.outputPresetId!==outputPreset.id) return {status:400,error:"Invalid output preset",code:"invalid_output_preset"};
+  if(body.outputPreset?.id && body.outputPreset.id!==outputPreset.id) return {status:400,error:"Invalid output preset",code:"invalid_output_preset"};
   if(!ALLOWED_SOURCES.includes(body.source)) return {status:400,error:"Invalid source path",code:"invalid_source"};
   if(!body.details || !hasText(body.details.memory)) return "Memory description is required.";
   if(String(body.details.memory).length>MAX_MEMORY_CHARS) return {status:400,error:"Memory description is too long. Please shorten it before generation.",code:"memory_too_long"};
@@ -63,6 +74,24 @@ function dataUrlToBlob(dataUrl){
 
 function buildSnapshotPrompt(body){
   const {details={},plan={},source}=body;
+  const outputPreset=resolveOutputPreset(body);
+  const deliveryGuidance=outputPreset.outputType==="print"
+    ? `
+Delivery preset: ${outputPreset.label}
+Target ratio: ${outputPreset.ratio}
+Composition guidance:
+- Build the artwork as a creative master that can be exported to this portrait print format.
+- Keep faces, hands, important objects and emotional details inside a safe central zone.
+- Avoid placing essential details or text-like marks close to the edges.
+- Leave natural breathing room around the scene so the image can be cropped or adapted for print.
+- Do not add borders, crop marks, DPI labels, watermarks or print production text inside the artwork.
+`
+    : `
+Delivery preset: Digital
+Composition guidance:
+- Create a balanced digital keepsake suitable for screen viewing and sharing.
+- Keep the main people and emotional visual anchor clearly readable.
+`;
   const people=(details.people || [])
     .map(person => `${person.name}${person.role ? ` (${person.role})` : ""}`)
     .join(", ") || "people visible in the source image";
@@ -85,6 +114,7 @@ Place: ${details.place || "not specified"}.
 Memory: ${details.memory}.
 Creative direction: ${details.theme || "not specified"}.
 Tone: ${details.tone || "not specified"}.
+${deliveryGuidance}
 
 Approved AI Snapshot brief:
 Title: ${plan.title}
@@ -183,10 +213,21 @@ export default async function handler(req,res){
     const b64=payload?.data?.[0]?.b64_json;
     if(!b64) throw new Error("OpenAI returned no image data.");
 
+    const outputPreset=resolveOutputPreset(body);
     return res.status(200).json({
       image:{
         dataUrl:`data:image/png;base64,${b64}`,
         mimeType:"image/png"
+      },
+      outputPreset,
+      delivery:{
+        stage:"creative_master",
+        outputType:outputPreset.outputType,
+        presetId:outputPreset.id,
+        label:outputPreset.resultLabel,
+        ratio:outputPreset.ratio,
+        targetPixels:outputPreset.targetPixels,
+        exportStatus:outputPreset.outputType==="print" ? "print_export_pending" : "digital_ready"
       },
       model: process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL
     });

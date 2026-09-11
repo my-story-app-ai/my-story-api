@@ -5,6 +5,9 @@
     },
     "api/snapshot-generate.js": {
       "maxDuration": 120
+    },
+    "api/story-render.js": {
+      "maxDuration": 120
     }
   }
 }
