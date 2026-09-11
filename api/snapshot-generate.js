@@ -1,4 +1,5 @@
 import { resolveOutputPreset as resolveConfiguredOutputPreset } from "./output-presets.js";
+import sharp from "sharp";
 
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_GENERATIONS_URL = "https://api.openai.com/v1/images/generations";
@@ -8,6 +9,7 @@ const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
 const MAX_MEMORY_CHARS = 5000;
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_IMAGE_TIMEOUT_MS || 110000);
 const ALLOWED_SOURCES = ["event","reconstruct"];
+const PRINT_JPEG_QUALITY = Math.max(80,Math.min(98,Number(process.env.PRINT_JPEG_QUALITY || 94)));
 
 function setCors(res){
   res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
@@ -129,6 +131,58 @@ Keep recognizable clothing, relationships, setting cues, atmosphere, and importa
 `.trim();
 }
 
+function extensionForMime(mimeType){
+  if(mimeType==="image/jpeg") return "jpg";
+  if(mimeType==="image/png") return "png";
+  return "img";
+}
+
+async function exportSnapshotImage(base64Image, outputPreset){
+  const masterBuffer=Buffer.from(base64Image,"base64");
+  if(outputPreset.outputType!=="print" || !outputPreset.targetPixels){
+    return {
+      buffer:masterBuffer,
+      mimeType:"image/png",
+      extension:"png",
+      width:null,
+      height:null,
+      dpi:null,
+      stage:"creative_master",
+      exportStatus:"digital_ready",
+      pipeline:["creative_master"]
+    };
+  }
+
+  const {width,height,dpi=300}=outputPreset.targetPixels;
+  const exportBuffer=await sharp(masterBuffer,{limitInputPixels:false})
+    .rotate()
+    .resize({
+      width,
+      height,
+      fit:"cover",
+      position:"attention",
+      withoutEnlargement:false
+    })
+    .jpeg({
+      quality:PRINT_JPEG_QUALITY,
+      mozjpeg:true
+    })
+    .withMetadata({density:dpi})
+    .toBuffer();
+
+  return {
+    buffer:exportBuffer,
+    mimeType:"image/jpeg",
+    extension:"jpg",
+    width,
+    height,
+    dpi,
+    stage:"final_export",
+    exportStatus:"print_ready",
+    pipeline:["creative_master","ratio_fit","upscale_export"]
+  };
+}
+
 async function fetchWithTimeout(url, options, timeoutMs=OPENAI_TIMEOUT_MS){
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(), timeoutMs);
@@ -214,20 +268,30 @@ export default async function handler(req,res){
     if(!b64) throw new Error("OpenAI returned no image data.");
 
     const outputPreset=resolveOutputPreset(body);
+    const exported=await exportSnapshotImage(b64,outputPreset);
+    const exportedBase64=exported.buffer.toString("base64");
+    const mimeType=exported.mimeType;
     return res.status(200).json({
       image:{
-        dataUrl:`data:image/png;base64,${b64}`,
-        mimeType:"image/png"
+        dataUrl:`data:${mimeType};base64,${exportedBase64}`,
+        mimeType,
+        extension:exported.extension,
+        width:exported.width,
+        height:exported.height,
+        dpi:exported.dpi
       },
       outputPreset,
       delivery:{
-        stage:"creative_master",
+        stage:exported.stage,
         outputType:outputPreset.outputType,
         presetId:outputPreset.id,
         label:outputPreset.resultLabel,
         ratio:outputPreset.ratio,
         targetPixels:outputPreset.targetPixels,
-        exportStatus:outputPreset.outputType==="print" ? "print_export_pending" : "digital_ready"
+        actualPixels:exported.width && exported.height ? {width:exported.width,height:exported.height,dpi:exported.dpi} : null,
+        fileExtension:extensionForMime(mimeType),
+        exportStatus:exported.exportStatus,
+        pipeline:exported.pipeline
       },
       model: process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL
     });
